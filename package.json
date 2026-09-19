@@ -1,0 +1,47 @@
+{
+  "name": "@dna113p/auto-machines",
+  "version": "0.1.0",
+  "description": "Run Machines from registered ticket sources.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dna113p/auto-machines.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "auto-machines": "./dist/src/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "test:tk": "node --test tests/tk-upstream.integration.ts"
+  },
+  "dependencies": {
+    "@dna113p/machines": "^0.3.0",
+    "yaml": "^2.8.1",
+    "valibot": "^1.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  }
+}
