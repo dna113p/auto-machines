@@ -1,9 +1,11 @@
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tk, type TkOptions } from "./tk.ts";
+import { github, type GitHubOptions } from "./github.ts";
 import type { WorkSource } from "./contracts.ts";
 export interface ConfigurationPrimitives {
   tk: (options: TkOptions) => WorkSource;
+  github: (options: GitHubOptions) => WorkSource;
 }
 export type Configuration = (
   helpers: ConfigurationPrimitives,
@@ -18,6 +20,11 @@ export async function loadConfiguration(
   if (typeof loaded.default !== "function")
     throw new Error("Configuration must default-export a registration factory");
   const sources: unknown = await loaded.default({
+    github: (options: GitHubOptions) =>
+      github({
+        ...options,
+        cwd: resolve(dirname(absolute), options.cwd),
+      }),
     tk: (options: TkOptions) => {
       const cwd = resolve(dirname(absolute), options.cwd);
       return tk({

@@ -9,6 +9,7 @@ export type {
 } from "./contracts.ts";
 export { ReportConflict } from "./contracts.ts";
 export { tk, type TkOptions, type TicketOutcome } from "./tk.ts";
+export { github, type GitHubOptions } from "./github.ts";
 export type { Configuration, ConfigurationPrimitives } from "./config.ts";
 export { request } from "./client.ts";
 export { startDaemon } from "./daemon.ts";

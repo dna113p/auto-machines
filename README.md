@@ -4,8 +4,9 @@ A local daemon that runs Machines from registered ticket sources. Each source
 owns its ticket format, dependencies, and result updates. Machines own the actual
 workflow: implementation, research, reviews, repository safety, and cleanup.
 
-The first adapter uses [tk](https://github.com/wedow/ticket)'s native Markdown
-files. It does not require a second ticket database or a running `tk` process.
+Adapters read [tk](https://github.com/wedow/ticket)'s native Markdown files and
+GitHub issues. Neither requires another ticket database; tk needs no running
+`tk` process.
 The daemon supports Linux and Node 24 or newer.
 
 ## Build from source
@@ -29,14 +30,22 @@ npm, ordinary `npm install` works. Neither package is published by these command
 Create `auto-machines.config.ts`:
 
 ```ts
-export default ({ tk }) => [
+export default ({ tk, github }) => [
   tk({
     id: "op",
     cwd: "./op",
     ticketsDir: ".tickets",
     defaultMachine: "research",
   }),
-  tk({ id: "another-project", cwd: "./another-project" }),
+  github({
+    id: "backend",
+    cwd: "./op",
+    repository: "owner/backend",
+    requiredLabels: ["status:ready", "automation:machines"],
+    excludedLabels: ["status:needs-scoping"],
+    defaultMachine: "implement",
+    input: { repository: "backend" },
+  }),
 ];
 ```
 
@@ -49,8 +58,10 @@ One registration can cover a workspace containing several repositories. Put its
 shared tickets in one directory, and include repository names or relative paths
 in ticket input. The Machine decides how to work in those repositories.
 
-Configuration and discovered Machine files are trusted executable code. Tickets
-select exact catalog names; ticket-supplied file paths are not executed.
+Configuration and discovered Machine files are trusted executable code. tk tickets
+select exact catalog names; ticket-supplied file paths are not executed. GitHub
+issues cannot select Machines, Agent bindings, or execution paths; their trusted
+registration supplies these settings.
 
 ## Start and inspect
 
@@ -109,7 +120,8 @@ Further context, design notes, and acceptance criteria belong here.
 ```
 
 Every unfinished, unblocked ticket is considered: both `open` and `in_progress`,
-matching `tk` readiness. No automation label or concurrency limit exists.
+matching `tk` readiness. The tk adapter has no automation label; the daemon has
+no concurrency limit.
 Register only ticket sources you intend to automate. Tickets without a Machine
 use the registration default; without either selection they show an error.
 An invalid explicit Machine never falls back to the default.
@@ -120,18 +132,56 @@ Agent bindings; each definition validates its own input shape before Operations.
 Validation/import failures that happen before admission are reconsidered on a
 later poll. A failed hosted attempt requires deliberate retry after fixing it.
 
-A tk-backed Machine receives:
+Both adapters supply the same input envelope:
 
 ```ts
 {
   ticket: { id, source, title, body, metadata },
-  input: /* ticket input field, or null */
+  input: /* tk input field, or GitHub registration input; otherwise null */
 }
 ```
 
 Paths in `input` are references, resolved by the Machine relative to its configured
 workspace. The adapter neither copies attachments nor makes a text-only Agent
 multimodal. A ticket's input is snapshotted for each attempt.
+
+## GitHub eligibility and authentication
+
+The GitHub adapter supports github.com repositories. Every `requiredLabels` entry
+must be present, and no `excludedLabels` entry may be present. At least one required
+label is mandatory. Pull requests are excluded. Labels are matched exactly; the
+adapter never creates or changes labels. A single trusted `defaultMachine` is
+required, with optional `input`, `agents`, and `home` for the whole registration.
+
+The adapter checks GitHub's [native issue dependencies](https://docs.github.com/en/rest/issues/issue-dependencies)
+during discovery, preparation, and result delivery. A prerequisite satisfies this
+adapter only when closed with `state_reason: "completed"`; open, cancelled,
+duplicate, and unknown/legacy closure reasons stay blocked. Remove or reconcile an
+obsolete relationship in GitHub explicitly. Markdown checklists and links are not
+dependencies, and the adapter does not coordinate prerequisites in other trackers.
+Dependency-read errors stop admission rather than treating unknown work as ready.
+
+A GitHub ticket's `id` is `owner/repo#number`; `metadata` contains `repository`,
+`number`, `nodeId`, `url`, and sorted label names. Stable native issue IDs determine
+execution keys. Editing titles, bodies, labels, comments, or timestamps does not
+create another request. `prepare` rereads task content, labels, identity, and
+prerequisites before allowing launch. Repository renames and issue transfers are
+rejected for explicit reconfiguration. Local deduplication does not claim issues
+against another daemon or computer.
+
+Authentication uses `GH_TOKEN`, then `GITHUB_TOKEN`, then a lazily invoked
+`gh auth token --hostname github.com`. The authenticated account needs repository
+access and Issues read/write permission for result comments and closure. No token
+is read and no subprocess is started when the adapter is constructed. Optional
+`token` and `fetch` overrides support controlled integrations and offline tests;
+prefer environment or gh authentication over putting credentials in config files.
+Requests use only `https://api.github.com`, reject redirects, and time out after
+20 seconds. Paginated issue, dependency, and comment reads validate next-page
+resources and filters, including GitHub's numeric repository aliases and opaque
+cursors; requests remain on the configured owner/repo endpoint. [Rate-limit responses](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)
+pause later requests until retry/reset deadlines with increasing backoff; they do
+not keep the daemon asleep. Rate or authentication failures remain visible in
+source/delivery diagnostics.
 
 ## Return a ticket outcome
 
@@ -143,13 +193,15 @@ Define the Machine's top-level XState `output` as one of these JSON objects:
 { action: "route", machine: "implement", input: { task: "..." }, summary: "Ready to implement." }
 ```
 
-`complete` appends the summary and closes the ticket. `hold` appends findings and
-leaves it open without launching it again locally. `route` appends findings,
+`complete` records the summary and closes the ticket. `hold` records findings and
+leaves it open without launching it again locally. For tk, `route` appends findings,
 updates its Machine and optional input/agents, and creates a new execution request.
+GitHub supports only `complete` and `hold`; `route` produces a visible writeback
+conflict instead of inventing tracker metadata or silently ignoring routing.
 A missing or malformed outcome is retained as a writeback conflict; it never
 closes the ticket. A Machine's final state alone is not a ticket outcome.
 
-The adapter manages `auto-machines-request` for routed work and puts attempt
+The tk adapter manages `auto-machines-request` for routed work and puts attempt
 markers in result notes. Replaying a writeback does not append duplicate notes.
 Ordinary edits and polling do not rerun an already-recorded request. Use `retry`
 for deliberate re-execution of an eligible ticket, including a reopened ticket.
@@ -161,6 +213,23 @@ failures retry automatically, independently of execution. Brief metadata writes
 serialize within the adapter; Machine runs remain parallel. Independent editors
 and `tk` processes do not share that write queue, so simultaneous external edits
 are still optimistic rather than a cross-process transaction.
+
+GitHub delivery posts a comment containing the attempt marker and summary. A
+`complete` then rereads the assignment before a state-only update to closed /
+completed. Replaying an uncertain comment or closure response finds the comment
+and finishes any remaining closure without duplicating it. Edited result comments,
+changed assignments, or issues closed without completion require intervention.
+The adapter preserves the issue body and user labels. GitHub's separate comment
+and state requests are not a transaction: external edits in the final read/write
+window remain optimistic, as with tk. A pending result comment can therefore be
+visible while closure is still pending or conflicted.
+
+Snapshots retain the open issue's state reason. If an issue is newly reopened
+before unfinished delivery retries, the adapter reports a conflict instead of
+closing it again. A deliberate new attempt can work on an already-reopened issue.
+An identical close/reopen cycle for a task admitted already reopened cannot be
+distinguished from pending closure using current issue state alone; this adapter
+does not read issue event history.
 
 ## Recovery and multiple computers
 
@@ -192,9 +261,10 @@ Only exact discovered Machine names are accepted in its launch request.
 `apply` must tolerate retries with the same `attemptId`. Throw `ReportConflict`
 for invalid output or changes requiring intervention; ordinary errors retry.
 A source owns its graph and output convention. A custom adapter can therefore
-use GitHub or Beads without teaching the daemon those ticket schemas.
+use another tracker without teaching the daemon its ticket schema.
 
-Configurations can return any conforming source alongside `tk(...)` registrations.
+Configurations can return any conforming source alongside `tk(...)` and
+`github(...)` registrations.
 The exported `request` client lets a future MCP or Pi adapter use the same daemon;
 the first version supplies CLI access rather than separate harness plugins.
 
@@ -215,5 +285,6 @@ npm run test:tk
 The package smoke installs real tarballs into a temporary consumer and completes
 the demo through the installed CLI. `test:tk` downloads pinned upstream commit
 `194b71a8bbc3771da1ce9f579395937c976bbddc` and checks file interoperability. Other
-tests use local fake runners and temporary tickets. Real agent workflows need
+tests use local fake runners, temporary tickets, and fake GitHub transports; they
+do not mutate live GitHub issues. Real agent workflows need
 their harnesses and credentials configured explicitly.
